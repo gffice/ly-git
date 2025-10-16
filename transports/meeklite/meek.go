@@ -34,9 +34,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/common/utlsutil"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	gourl "net/url"
@@ -47,7 +45,8 @@ import (
 
 	utls "github.com/refraction-networking/utls"
 
-	"gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/goptlib"
+	pt "gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/goptlib"
+	"gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/common/utlsutil"
 	"gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/transports/base"
 )
 
@@ -260,7 +259,7 @@ func (c *meekConn) roundTrip(sndBuf []byte) (recvBuf []byte, err error) {
 		}
 
 		if resp.StatusCode == http.StatusOK {
-			recvBuf, err = ioutil.ReadAll(io.LimitReader(resp.Body, maxPayloadLength))
+			recvBuf, err = io.ReadAll(io.LimitReader(resp.Body, maxPayloadLength))
 			resp.Body.Close()
 			return
 		}
