@@ -82,6 +82,11 @@ func (c *clientFactory) parseArgs(args *pt.Args) (interface{}, error) {
 		config.TLSServerName = url.Hostname()
 	}
 
+	if syntacticSugarOptionSNIImitation, ok := args.Get("sni-imitation"); ok {
+		config.TLSServerName = syntacticSugarOptionSNIImitation
+		config.UTLSInsecureServerNameToVerify = config.HTTPHost
+	}
+
 	if tlsServerName, ok := args.Get("servername"); ok {
 		config.TLSServerName = tlsServerName
 	}
