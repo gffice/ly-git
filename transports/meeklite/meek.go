@@ -34,27 +34,27 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/common/utlsutil"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
-	gourl "net/url"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
 	utls "github.com/refraction-networking/utls"
 
-	"gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/goptlib"
+	pt "gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/goptlib"
+	"gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/common/utlsutil"
 	"gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/transports/base"
 )
 
 const (
-	urlArg   = "url"
-	frontArg = "front"
-	utlsArg  = "utls"
+	targetsArg = "targets"
+	urlArg     = "url"
+	frontArg   = "front"
+	utlsArg    = "utls"
 
 	maxChanBacklog = 16
 
@@ -64,7 +64,7 @@ const (
 	maxPollInterval        = 5 * time.Second
 	pollIntervalMultiplier = 1.5
 	maxRetries             = 10
-	retryDelay             = 30 * time.Second
+	retryDelay             = 100 * time.Millisecond
 )
 
 var (
@@ -75,10 +75,8 @@ var (
 )
 
 type meekClientArgs struct {
-	url   *gourl.URL
-	front string
-
-	utls *utls.ClientHelloID
+	fronts *frontsList
+	utls   *utls.ClientHelloID
 }
 
 func (ca *meekClientArgs) Network() string {
@@ -86,29 +84,27 @@ func (ca *meekClientArgs) Network() string {
 }
 
 func (ca *meekClientArgs) String() string {
-	return transportName + ":" + ca.front + ":" + ca.url.String()
+	return transportName + ": " + ca.fronts.String()
 }
 
 func newClientArgs(args *pt.Args) (ca *meekClientArgs, err error) {
 	ca = &meekClientArgs{}
 
-	// Parse the URL argument.
-	str, ok := args.Get(urlArg)
-	if !ok {
-		return nil, fmt.Errorf("missing argument '%s'", urlArg)
+	targetsStr, ok := args.Get(targetsArg)
+	if ok {
+		ca.fronts, err = parseTargets(targetsStr)
+	} else {
+		ca.fronts = NewFrontsList()
+		url, ok := args.Get(urlArg)
+		if !ok {
+			return nil, fmt.Errorf("missing argument '%s'", urlArg)
+		}
+		front, _ := args.Get(frontArg)
+		err = ca.fronts.Add(url, front)
 	}
-	ca.url, err = gourl.Parse(str)
 	if err != nil {
-		return nil, fmt.Errorf("malformed url: '%s'", str)
+		return nil, err
 	}
-	switch ca.url.Scheme {
-	case "http", "https":
-	default:
-		return nil, fmt.Errorf("invalid scheme: '%s'", ca.url.Scheme)
-	}
-
-	// Parse the (optional) front argument.
-	ca.front, _ = args.Get(frontArg)
 
 	// Parse the (optional) utls argument.
 	utlsOpt, _ := args.Get(utlsArg)
@@ -117,6 +113,33 @@ func newClientArgs(args *pt.Args) (ca *meekClientArgs, err error) {
 	}
 
 	return ca, nil
+}
+
+func parseTargets(targetsStr string) (*frontsList, error) {
+	fl := NewFrontsList()
+	toParse := targetsStr
+	for {
+		parts := strings.SplitN(toParse, "|", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid targets in bridgline, missing '|': %s", targetsStr)
+		}
+		url := parts[0]
+
+		parts = strings.SplitN(parts[1], ",", 2)
+		for _, front := range strings.Split(parts[0], "+") {
+			err := fl.Add(url, front)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		if len(parts) == 1 {
+			break
+		} else {
+			toParse = parts[1]
+		}
+	}
+	return fl, nil
 }
 
 type meekConn struct {
@@ -235,20 +258,25 @@ func (c *meekConn) roundTrip(sndBuf []byte) (recvBuf []byte, err error) {
 	var resp *http.Response
 
 	for retries := 0; retries < maxRetries; retries++ {
-		url := *c.args.url
+		url := *c.args.fronts.URL()
+		originalUrl := url.String()
+		front := c.args.fronts.Front()
+
 		host := url.Host
-		if c.args.front != "" {
-			url.Host = c.args.front
+		if front != "" {
+			url.Host = front
 		}
+
 		var body io.Reader
 		if len(sndBuf) > 0 {
 			body = bytes.NewReader(sndBuf)
 		}
 		req, err = http.NewRequest("POST", url.String(), body)
 		if err != nil {
+			pt.Log(pt.LogSeverityWarning, "Failed to create a request to "+originalUrl+" using front "+front+": "+err.Error())
 			return nil, err
 		}
-		if c.args.front != "" {
+		if front != "" {
 			req.Host = host
 		}
 		req.Header.Set("X-Session-Id", c.sessionID)
@@ -256,17 +284,22 @@ func (c *meekConn) roundTrip(sndBuf []byte) (recvBuf []byte, err error) {
 
 		resp, err = c.roundTripper.RoundTrip(req)
 		if err != nil {
-			return nil, err
+			pt.Log(pt.LogSeverityWarning, "Failed to connect to "+originalUrl+" using front "+front+": "+err.Error())
+			c.args.fronts.Next()
+			continue
 		}
 
 		if resp.StatusCode == http.StatusOK {
-			recvBuf, err = ioutil.ReadAll(io.LimitReader(resp.Body, maxPayloadLength))
+			pt.Log(pt.LogSeverityInfo, "Connected to "+originalUrl+" using front "+front)
+			recvBuf, err = io.ReadAll(io.LimitReader(resp.Body, maxPayloadLength))
 			resp.Body.Close()
 			return
 		}
 
 		resp.Body.Close()
 		err = fmt.Errorf("status code was %d, not %d", resp.StatusCode, http.StatusOK)
+		pt.Log(pt.LogSeverityWarning, "Failed to connect to "+originalUrl+" using front "+front+": "+err.Error())
+		c.args.fronts.Next()
 		time.Sleep(retryDelay)
 	}
 	return

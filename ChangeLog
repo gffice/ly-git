@@ -1,3 +1,6 @@
+Changes in version 0.8.0 - 2025-12-09:
+- Add support for multiple url/front pairs in meek
+
 Changes in version 0.7.0 - 2025-11-19:
 - add certificate hash chain pinning support to webtunnel
 - Add multiple server name support for webtunnel
